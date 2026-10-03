@@ -60,6 +60,10 @@ class AssayVersion(Base):
     basis: Mapped[str] = mapped_column(String(8), default="dry")  # dry / wet
     composition: Mapped[dict] = mapped_column(JSON)
     measured_oxides: Mapped[list] = mapped_column(JSON)  # 实际测定项目，如 ["CaO","SiO2"]
+    # 检测不确定度（与本化验单同一基准的逐组分绝对偏置，百分点）：
+    # {"SiO2": {"lower": -0.3, "upper": 0.2}}；NULL/缺项 = 零容差（精确常量）。
+    # 湿基化验单在此给出湿基偏置，求解前统一按 1/(1-w) 放大到干基。
+    uncertainty: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
     material: Mapped["Material"] = relationship(back_populates="assay_versions")
@@ -98,6 +102,10 @@ class BlendSolution(Base):
     total_cost: Mapped[float | None] = mapped_column(Float, nullable=True)
     indicators: Mapped[dict] = mapped_column(JSON)  # SM/IM/KH + 合成成分 + 有害组分
     diagnostic: Mapped[dict | None] = mapped_column(JSON, nullable=True)  # 冲突项诊断
+    # 稳健（检测不确定度）模式产物，均为可空：名义求解的旧行/新行这些列保持 NULL。
+    robust_mode: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    # nominal：名义化验值方案；robust：最坏边界下仍可行的方案
+    robust_report: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
     run: Mapped["BlendRun"] = relationship(back_populates="solutions")
@@ -125,5 +133,8 @@ class BlendItem(Base):
     # 换算留痕：湿基->干基/干基->湿基每个氧化物的完整过程
     conversion_trace: Mapped[dict] = mapped_column(JSON)
     assay_composition_snapshot: Mapped[dict] = mapped_column(JSON)  # 原始化验单快照
+    # 稳健模式附加留痕（可空）：该原料名义值/干基上下界、被采用的最坏边界组分。
+    uncertainty_trace: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    worst_case_snapshot: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
     run: Mapped["BlendRun"] = relationship(back_populates="items")

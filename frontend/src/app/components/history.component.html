@@ -15,7 +15,9 @@
             <td class="mono small">{{ r.run_code }}</td>
             <td>{{ r.scenario_name }}</td>
             <td><span [class]="'badge ' + (r.status === 'feasible' ? 'ok' : 'err')">
-              {{ r.status }}</span></td>
+              {{ r.status }}</span>
+              <span class="badge warn small" *ngIf="r.robust_mode === 'robust'">稳健</span>
+            </td>
             <td class="small">{{ r.modes.join('/') }}</td>
             <td class="small muted">{{ r.created_at }}</td>
             <td><button class="ghost" (click)="open(r.id)">回看</button></td>
@@ -53,6 +55,62 @@
           <div class="small" *ngFor="let c of s.diagnostic.conflicts">
             · {{ c.constraint }}：限值 {{ c.limit ?? '—' }}，达到 {{ c.achieved ?? '—' }}，缺口 {{ c.normalized_gap }}
           </div>
+        </div>
+
+        <!-- 稳健子方案（历史快照） -->
+        <div *ngIf="s.robust" class="robust-box" style="margin-top:8px">
+          <div class="row">
+            <strong>🛡 检测不确定度稳健方案（当次快照）</strong>
+            <span class="spacer"></span>
+            <span [class]="'badge ' + (s.robust.success ? 'ok' : 'err')">
+              {{ s.robust.success ? '最坏边界可行' : '最坏边界不可行' }}</span>
+          </div>
+          <div *ngIf="s.robust.success && s.robust.robust_report as rp" class="small">
+            <table style="margin-top:4px">
+              <thead><tr><th>指标</th><th class="num">名义</th>
+                <th class="num">最坏下/上</th><th class="num">下/上余量</th></tr></thead>
+              <tbody>
+                <tr *ngFor="let k of ['SM','IM','KH']">
+                  <td>{{ k }}</td>
+                  <td class="num">{{ rp.margins[k].nominal }}</td>
+                  <td class="num">{{ rp.margins[k].worst_low }} / {{ rp.margins[k].worst_high }}</td>
+                  <td class="num">{{ rp.margins[k].headroom_low ?? '—' }} / {{ rp.margins[k].headroom_high ?? '—' }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <div *ngIf="!s.robust.success && s.robust.diagnostic" class="callout err" style="margin-top:6px">
+            <div class="small" *ngFor="let c of s.robust.diagnostic.conflicts">
+              · {{ c.constraint }}：限值 {{ c.limit ?? '—' }}，
+              最坏达到 <strong>{{ c.achieved ?? '—' }}</strong>，
+              突破量 {{ c.breach ?? c.normalized_gap }}
+              <div *ngIf="c.boundary_combo?.length" class="muted" style="margin-left:12px">
+                <span *ngFor="let m of c.boundary_combo">
+                  [{{ m.material_code }} {{ m.assay_version }} {{ m.lab_report_no }}：
+                  <span *ngFor="let cc of objEntries(m.components)">
+                    {{ cc[0] }}取{{ cc[1].side === 'upper' ? '上' : '下' }}界
+                    {{ cc[1].used_dry_pct }}%；</span>]
+                </span>
+              </div>
+            </div>
+          </div>
+          <details class="trace" *ngIf="s.robust.items?.length">
+            <summary>稳健方案逐原料干基上下界（历史留痕）</summary>
+            <table>
+              <tr *ngFor="let it of s.robust.items">
+                <td class="small">{{ it.material_code }}</td>
+                <td class="small mono">{{ it.assay_version }} / {{ it.lab_report_no }}</td>
+                <td class="num">{{ it.share_pct_dry }}%</td>
+                <td>
+                  <span *ngFor="let st of nontrivial(it.uncertainty_trace?.steps)"
+                        class="small mono" style="margin-right:8px">
+                    {{ st.component }} {{ st.lower_dry }}~{{ st.upper_dry }}%
+                    <span class="badge wet" *ngIf="st.basis_in==='wet'">湿→干</span>
+                  </span>
+                </td>
+              </tr>
+            </table>
+          </details>
         </div>
 
         <table *ngIf="s.items?.length" style="margin-top:8px">

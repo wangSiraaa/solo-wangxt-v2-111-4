@@ -137,3 +137,15 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 details.trace summary { cursor: pointer; color: var(--brand); font-weight: 600; }
 .kpi { font-size: 22px; font-weight: 700; color: var(--brand); }
 .kpi small { font-size: 12px; color: var(--muted); font-weight: 400; }
+
+/* 检测不确定度稳健区块 */
+.robust-box {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border: 1px dashed #8a6d1d;
+  border-radius: 8px;
+  background: #fdfaf1;
+}
+.robust-box h3 { color: #6b5210; }
+td.risk, .risk { color: var(--err); font-weight: 600; }
+.badge.small { font-size: 10px; padding: 1px 6px; }

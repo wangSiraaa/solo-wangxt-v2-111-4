@@ -51,16 +51,42 @@
             </span>
           </td>
           <td class="num">{{ totalDry(m).toFixed(2) }}</td>
+          <td>
+            <span class="badge ok small" *ngIf="!uncertainEntries(chosen(m)).length">零容差</span>
+            <span class="badge warn small" *ngIf="uncertainEntries(chosen(m)).length"
+                  [title]="'检测不确定度（同基准绝对偏置）'">
+              容差 ×{{ uncertainEntries(chosen(m)).length }}
+            </span>
+          </td>
           <td><button class="ghost" (click)="expanded[m.id] = !expanded[m.id]">
             {{ expanded[m.id] ? '收起' : '化验单' }}</button></td>
         </tr>
         <tr *ngIf="expanded[m.id]">
-          <td [attr.colspan]="ox.length + 10" style="background:#fbfcfd">
+          <td [attr.colspan]="ox.length + 11" style="background:#fbfcfd">
             <div class="small muted">{{ m.note }}</div>
             <div class="small" style="margin-top:6px" *ngIf="chosen(m)?.basis === 'wet'">
               湿→干换算系数 1/(1−{{ m.moisture_pct }}/100) =
               <strong class="mono">{{ (1/(1 - m.moisture_pct/100)).toFixed(5) }}</strong>，
               各组分与 LOI 均除以 (1−含水率)；自由水不并入 LOI。
+            </div>
+            <div class="small" style="margin-top:6px">
+              <strong>检测不确定度</strong>（与化验单同基准的绝对偏置，百分点；
+              湿基容差也按 ×1/(1−w) 换干基参与稳健计算）：
+              <span class="muted" *ngIf="!uncertainEntries(chosen(m)).length">
+                本版未声明容差——全部组分按零容差（精确常量）处理。</span>
+              <table *ngIf="uncertainEntries(chosen(m)).length" style="margin-top:4px">
+                <thead><tr><th>组分</th><th class="num">下偏置（输入基准）</th>
+                  <th class="num">上偏置</th><th class="num">干基区间</th></tr></thead>
+                <tbody>
+                  <tr *ngFor="let e of uncertainEntries(chosen(m))">
+                    <td>{{ e[0] }}</td>
+                    <td class="num">{{ e[1].lower }}</td>
+                    <td class="num">+{{ e[1].upper }}</td>
+                    <td class="num mono">{{ dryUnc(m, chosen(m), e[1]) }}
+                      （以 0 为半宽的干基偏置）</td>
+                  </tr>
+                </tbody>
+              </table>
             </div>
           </td>
         </tr>

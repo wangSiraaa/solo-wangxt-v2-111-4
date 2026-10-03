@@ -1,7 +1,7 @@
 import { Component, OnInit } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
-import { Material } from '../models/models';
+import { AssayVersion, Material } from '../models/models';
 import { ApiService } from '../services/api.service';
 
 const OX = ['CaO', 'SiO2', 'Al2O3', 'Fe2O3', 'MgO', 'SO3', 'K2O', 'Na2O', 'Cl', 'LOI'];
@@ -59,5 +59,19 @@ export class MaterialsComponent implements OnInit {
     if (!a) return 0;
     const f = a.basis === 'wet' ? 1 / (1 - m.moisture_pct / 100) : 1;
     return OX.reduce((s, o) => s + (o in a.composition ? a.composition[o] * f : 0), 0);
+  }
+
+  /** 该化验版声明了非零容差的组分 */
+  uncertainEntries(a: AssayVersion | undefined): [string, { lower: number; upper: number }][] {
+    if (!a?.uncertainty) return [];
+    return Object.entries(a.uncertainty)
+      .filter(([, v]) => (v.lower ?? 0) !== 0 || (v.upper ?? 0) !== 0)
+      .map(([k, v]) => [k, v]);
+  }
+
+  /** 容差换算到干基后的半宽展示（湿基 ×1/(1-w)） */
+  dryUnc(m: Material, a: AssayVersion | undefined, v: { lower: number; upper: number }): string {
+    const f = a?.basis === 'wet' ? 1 / (1 - m.moisture_pct / 100) : 1;
+    return `[${(v.lower * f).toFixed(3)}, +${(v.upper * f).toFixed(3)}]`;
   }
 }

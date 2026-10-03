@@ -7,11 +7,55 @@ from datetime import datetime
 
 from sqlalchemy import select
 
-from .database import Base, SessionLocal, engine
+from .database import Base, SessionLocal, engine, ensure_schema
 from .models import AssayVersion, Material
 
 ALL_MAJOR = ["CaO", "SiO2", "Al2O3", "Fe2O3",
              "MgO", "SO3", "K2O", "Na2O", "Cl", "LOI"]
+
+# 干基化验单的演示不确定度（绝对偏置，百分点；lower≤0≤upper）
+U_LS = {"CaO": {"lower": -0.20, "upper": 0.20},
+        "SiO2": {"lower": -0.10, "upper": 0.10},
+        "Al2O3": {"lower": -0.05, "upper": 0.05},
+        "Fe2O3": {"lower": -0.04, "upper": 0.04},
+        "K2O": {"lower": -0.02, "upper": 0.02},
+        "Na2O": {"lower": -0.01, "upper": 0.01},
+        "Cl": {"lower": -0.002, "upper": 0.002}}
+U_SS = {"CaO": {"lower": -0.10, "upper": 0.10},
+        "SiO2": {"lower": -0.40, "upper": 0.40},
+        "Al2O3": {"lower": -0.15, "upper": 0.15},
+        "Fe2O3": {"lower": -0.10, "upper": 0.10},
+        "K2O": {"lower": -0.03, "upper": 0.03},
+        "Na2O": {"lower": -0.02, "upper": 0.02},
+        "Cl": {"lower": -0.003, "upper": 0.003}}
+U_SH = {"CaO": {"lower": -0.15, "upper": 0.15},
+        "SiO2": {"lower": -0.45, "upper": 0.45},
+        "Al2O3": {"lower": -0.20, "upper": 0.20},
+        "Fe2O3": {"lower": -0.15, "upper": 0.15},
+        "K2O": {"lower": -0.06, "upper": 0.06},
+        "Na2O": {"lower": -0.03, "upper": 0.03},
+        "Cl": {"lower": -0.004, "upper": 0.004}}
+# 粉煤灰为湿基化验单：容差同样按湿基百分点声明，求解前 ×1/(1−0.18) 换干基
+U_AS_WET = {"CaO": {"lower": -0.123, "upper": 0.123},
+            "SiO2": {"lower": -0.328, "upper": 0.328},
+            "Al2O3": {"lower": -0.205, "upper": 0.205},
+            "Fe2O3": {"lower": -0.082, "upper": 0.082},
+            "K2O": {"lower": -0.041, "upper": 0.041},
+            "Na2O": {"lower": -0.041, "upper": 0.041},
+            "Cl": {"lower": -0.004, "upper": 0.004}}
+U_IR = {"CaO": {"lower": -0.10, "upper": 0.10},
+        "SiO2": {"lower": -0.20, "upper": 0.20},
+        "Al2O3": {"lower": -0.10, "upper": 0.10},
+        "Fe2O3": {"lower": -0.50, "upper": 0.50},
+        "K2O": {"lower": -0.02, "upper": 0.02},
+        "Na2O": {"lower": -0.01, "upper": 0.01},
+        "Cl": {"lower": -0.003, "upper": 0.003}}
+# 演示料：Fe2O3 名义 0.18，下界 0.00 —— 检测区间触及零，
+# 稳健模式下 IM 分母可能为零，必须明确拒绝（不报无定义率值）。
+U_QZ01 = {"CaO": {"lower": -0.02, "upper": 0.02},
+          "SiO2": {"lower": -0.40, "upper": 0.40},
+          "Al2O3": {"lower": -0.05, "upper": 0.05},
+          "Fe2O3": {"lower": -0.18, "upper": 0.05}}
 
 MATERIALS = [
     dict(
@@ -25,13 +69,15 @@ MATERIALS = [
                  composition={"CaO": 49.5, "SiO2": 5.2, "Al2O3": 1.4, "Fe2O3": 0.7,
                               "MgO": 1.2, "SO3": 0.25, "K2O": 0.35, "Na2O": 0.08,
                               "Cl": 0.005, "LOI": 41.315},
-                 measured_oxides=ALL_MAJOR),
+                 measured_oxides=ALL_MAJOR,
+                 uncertainty=U_LS),
             dict(version="V2026-08", lab_report_no="LAB-2608-077",
                  assayed_at=datetime(2026, 8, 15), basis="dry",
                  composition={"CaO": 48.9, "SiO2": 5.9, "Al2O3": 1.6, "Fe2O3": 0.8,
                               "MgO": 1.3, "SO3": 0.28, "K2O": 0.4, "Na2O": 0.09,
                               "Cl": 0.006, "LOI": 40.724},
-                 measured_oxides=ALL_MAJOR),
+                 measured_oxides=ALL_MAJOR,
+                 uncertainty=None),  # 旧化验版：零容差（视为精确常量）
         ],
     ),
     dict(
@@ -45,7 +91,8 @@ MATERIALS = [
                                     "Fe2O3": 3.8, "MgO": 0.8, "SO3": 0.1,
                                     "K2O": 1.1, "Na2O": 0.25, "Cl": 0.01,
                                     "LOI": 4.94},
-                       measured_oxides=ALL_MAJOR)]),
+                       measured_oxides=ALL_MAJOR,
+                       uncertainty=U_SS)]),
     dict(
         code="SH01", name="页岩(廉价虚构C矿)", category="硅铝质",
         moisture_pct=14.0, cost_per_t_wet=22.0, availability_t_wet=1200.0,
@@ -57,7 +104,8 @@ MATERIALS = [
                                     "Fe2O3": 7.5, "MgO": 2.2, "SO3": 0.3,
                                     "K2O": 2.6, "Na2O": 0.7, "Cl": 0.02,
                                     "LOI": 6.68},
-                       measured_oxides=ALL_MAJOR)]),
+                       measured_oxides=ALL_MAJOR,
+                       uncertainty=U_SH)]),
     dict(
         code="AS01", name="粉煤灰(湿排·湿基化验单)", category="铝质校正",
         moisture_pct=18.0, cost_per_t_wet=18.0, availability_t_wet=600.0,
@@ -70,7 +118,8 @@ MATERIALS = [
                                     "Fe2O3": 5.33, "MgO": 1.23, "SO3": 0.656,
                                     "K2O": 1.476, "Na2O": 0.738, "Cl": 0.0123,
                                     "LOI": 4.9077},
-                       measured_oxides=ALL_MAJOR)]),
+                       measured_oxides=ALL_MAJOR,
+                       uncertainty=U_AS_WET)]),
     dict(
         code="IR01", name="铁粉(虚构副产)", category="铁质校正",
         moisture_pct=8.0, cost_per_t_wet=320.0, availability_t_wet=200.0,
@@ -82,7 +131,8 @@ MATERIALS = [
                                     "Fe2O3": 62.0, "MgO": 2.5, "SO3": 1.2,
                                     "K2O": 0.4, "Na2O": 0.1, "Cl": 0.02,
                                     "LOI": 6.78},
-                       measured_oxides=ALL_MAJOR)]),
+                       measured_oxides=ALL_MAJOR,
+                       uncertainty=U_IR)]),
     # ---- 以下为报错/极端情形演示物料，默认不进入常规候选 ----
     dict(
         code="QZ01", name="高纯石英砂(演示)", category="演示用",
@@ -95,7 +145,8 @@ MATERIALS = [
                                     "Fe2O3": 0.18, "MgO": 0.05, "SO3": 0.0,
                                     "K2O": 0.05, "Na2O": 0.02, "Cl": 0.0,
                                     "LOI": 0.7},
-                       measured_oxides=ALL_MAJOR)]),
+                       measured_oxides=ALL_MAJOR,
+                       uncertainty=U_QZ01)]),
     dict(
         code="SP01", name="缺测矿样(演示·Fe2O3未检)", category="演示用",
         moisture_pct=3.0, cost_per_t_wet=30.0, availability_t_wet=300.0,
@@ -120,7 +171,7 @@ MATERIALS = [
 
 
 def seed():
-    Base.metadata.create_all(bind=engine)
+    ensure_schema()
     db = SessionLocal()
     try:
         if db.scalars(select(Material)).first():

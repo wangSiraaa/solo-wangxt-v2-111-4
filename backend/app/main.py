@@ -13,7 +13,7 @@ from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
 
 from . import chemistry, crud, optimizer
-from .database import Base, engine, get_db
+from .database import Base, engine, ensure_schema, get_db
 from .schemas import (
     BlendRequest,
     BlendResponse,
@@ -23,8 +23,6 @@ from .schemas import (
     SolutionOut,
 )
 
-Base.metadata.create_all(bind=engine)
-
 app = FastAPI(
     title="离线原料配比试算（虚构工艺边界 · 研发用）",
     version="1.0.0",
@@ -33,6 +31,13 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"]
 )
+
+
+@app.on_event("startup")
+def _startup_ensure_schema():
+    # 幂等建表/补列放在 startup：导入 app 不产生数据库副作用，便于无库环境单测
+    Base.metadata.create_all(bind=engine)
+    ensure_schema()
 
 
 @app.exception_handler(chemistry.BlendError)
@@ -59,6 +64,21 @@ def materials(active_only: bool = False, db: Session = Depends(get_db)):
     return crud.list_materials(db, active_only=active_only)
 
 
+def _clean_items(items: list[dict]) -> list[dict]:
+    return [{k: v for k, v in it.items() if not k.startswith("_")}
+            for it in items or []]
+
+
+def _clean_robust(robust: dict | None) -> dict | None:
+    """稳健子方案出参：剥离内部 _ 字段（嵌套 items 同样处理）。"""
+    if not robust:
+        return None
+    out = dict(robust)
+    if "items" in out:
+        out["items"] = _clean_items(out.get("items", []))
+    return out
+
+
 def _serialize_solution(sol: dict) -> SolutionOut:
     return SolutionOut(
         mode=sol["mode"],
@@ -73,6 +93,7 @@ def _serialize_solution(sol: dict) -> SolutionOut:
         diagnostic=sol.get("diagnostic"),
         items=[SolutionItem(**{k: v for k, v in it.items()
                                if not k.startswith("_")}) for it in sol.get("items", [])],
+        robust=_clean_robust(sol.get("robust")),
     )
 
 
@@ -84,6 +105,13 @@ def blend(req: BlendRequest, db: Session = Depends(get_db)):
         raise HTTPException(400, "候选原料为空。")
     solutions = optimizer.solve(rows, req)
     run_id, run_code = None, ""
+    robust_status = None
+    if req.robust_mode == "robust":
+        robust_status = (
+            "robust_feasible"
+            if any(s.get("robust", {}).get("success") for s in solutions)
+            else "robust_infeasible"
+        )
     if req.save:
         run = crud.save_run(db, req, solutions)
         run_id, run_code = run.id, run.run_code
@@ -91,6 +119,7 @@ def blend(req: BlendRequest, db: Session = Depends(get_db)):
         run_id=run_id,
         run_code=run_code,
         status="feasible" if any(s["success"] for s in solutions) else "infeasible",
+        robust_status=robust_status,
         solutions=[_serialize_solution(s) for s in solutions],
     )
 

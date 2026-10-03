@@ -1,7 +1,9 @@
 import { Component, Input } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
-import { Solution, Targets } from '../models/models';
+import {
+  Conflict, MarginRow, RobustSolution, Solution, Targets,
+} from '../models/models';
 import { StackBarComponent, Seg, colorOf } from './stack-bar.component';
 
 interface Row { code: string; name: string; share: number; }
@@ -26,6 +28,37 @@ export class SolutionCardComponent {
 
   ratioCls(v: number, lo: any, hi: any): string {
     return this.inRange(v, lo, hi) ? 'badge ok' : 'badge err';
+  }
+
+  /** 稳健余量着色：>=0 安全（绿），<0 被边界突破（红） */
+  headCls(v: number | undefined): string {
+    if (v == null) return 'badge';
+    return v >= -1e-9 ? 'badge ok' : 'badge err';
+  }
+
+  robust(): RobustSolution | null | undefined {
+    return this.sol.robust;
+  }
+
+  marginEntries(): { key: string; row: MarginRow; lo: any; hi: any }[] {
+    const r = this.robust()?.robust_report?.margins;
+    if (!r) return [];
+    return [
+      { key: 'SM', row: r.SM, lo: this.targets?.SM?.min, hi: this.targets?.SM?.max },
+      { key: 'IM', row: r.IM, lo: this.targets?.IM?.min, hi: this.targets?.IM?.max },
+      { key: 'KH', row: r.KH, lo: this.targets?.KH?.min, hi: this.targets?.KH?.max },
+    ];
+  }
+
+  hazardEntries(): { key: string; worst: number; limit: number; head: number }[] {
+    const h = this.robust()?.robust_report?.margins?.hazards || {};
+    return Object.entries(h).map(([key, v]) => ({
+      key, worst: v.worst_high, limit: v.limit, head: v.headroom,
+    }));
+  }
+
+  robustConflicts(): Conflict[] {
+    return this.robust()?.diagnostic?.conflicts || [];
   }
 
   shareSegs(): Seg[] {
@@ -69,4 +102,30 @@ export class SolutionCardComponent {
   loi(): number | null {
     return this.sol.composition_dry_pct?.['LOI'] ?? null;
   }
+
+  // ---------- 稳健子方案展示辅助 ----------
+  keyVal(obj: Record<string, any>): [string, any][] {
+    return Object.entries(obj || {});
+  }
+
+  comboText(combo: Record<string, string> | undefined): string {
+    if (!combo) return '';
+    return Object.entries(combo)
+      .map(([c, side]) => `${c}${side === 'upper' ? '↑' : '↓'}`).join(' ');
+  }
+
+  nontrivialSteps(it: any): any[] {
+    return (it?.uncertainty_trace?.steps || []).filter((s: any) => !s.zero_tolerance);
+  }
+
+  robustSegs(): Seg[] {
+    const rb = this.robust();
+    this.paletteUsed = [];
+    return (rb?.items || []).map(it => ({
+      label: `${it.material_code} ${it.material_name}`,
+      value: it.share_pct_dry,
+      color: colorOf(it.material_code, this.paletteUsed),
+    }));
+  }
 }
+

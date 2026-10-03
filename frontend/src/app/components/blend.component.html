@@ -100,6 +100,19 @@
         率值居中平衡方案（区间中点偏差最小）</label>
     </div>
 
+    <div class="callout warn" style="margin-top:10px">
+      <label class="small" style="display:flex;gap:8px;align-items:flex-start">
+        <input type="checkbox" [(ngModel)]="robustMode" style="margin-top:3px" />
+        <span>
+          <strong>检测不确定度稳健模式</strong>
+          （robust）：每个 SM/IM/KH/有害组分约束都在“对该约束最不利”的检测边界组合上
+          同时校验——<strong>不是抽一个幸运样本</strong>。化验单在「① 原料与化验」中声明
+          同基准上下偏置（湿基先按 1/(1−w) 换干基）；未声明或容差为零的组分按精确常量处理。
+          分母区间可能跨零时<strong>明确拒绝</strong>，不输出无定义率值。
+        </span>
+      </label>
+    </div>
+
     <label class="small" style="display:block;margin-top:10px">试算名称
       <input class="wide" type="text" [(ngModel)]="scenario" /></label>
     <div class="row" style="margin-top:12px">
@@ -130,8 +143,14 @@
 <ng-container *ngIf="result">
   <div class="callout info">
     试算批次 <span class="mono">{{ result.run_code }}</span>
-    状态：<span [class]="'badge ' + (result.status === 'feasible' ? 'ok' : 'err')">
+    名义状态：<span [class]="'badge ' + (result.status === 'feasible' ? 'ok' : 'err')">
     {{ result.status === 'feasible' ? '存在可行解' : '全部无解' }}</span>
+    <ng-container *ngIf="result.robust_status">
+      · 稳健状态：
+      <span [class]="'badge ' + (result.robust_status === 'robust_feasible' ? 'ok' : 'err')">
+        {{ result.robust_status === 'robust_feasible'
+           ? '全部检测边界下仍可行' : '检测边界下不可行' }}</span>
+    </ng-container>
     （共 {{ result.solutions.length }} 个方案）
   </div>
   <app-solution-card *ngFor="let s of result.solutions; let i = index"

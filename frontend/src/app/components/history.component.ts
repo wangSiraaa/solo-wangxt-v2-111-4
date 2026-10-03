@@ -32,4 +32,12 @@ export class HistoryComponent implements OnInit {
     return s.payload?.indicators?.[key] != null
       ? Number(s.payload.indicators[key]).toFixed(3) : '—';
   }
+
+  objEntries(obj: any): [string, any][] {
+    return Object.entries(obj || {});
+  }
+
+  nontrivial(steps: any[] | undefined | null): any[] {
+    return (steps || []).filter(s => !s.zero_tolerance);
+  }
 }

@@ -26,6 +26,7 @@ interface Preset {
   cheap_id?: number;
   batch?: number;
   demo?: boolean;
+  robust?: boolean;
 }
 
 const BASE_T: Targets = { SM: { min: 2.4, max: 2.8 }, IM: { min: 1.4, max: 1.8 }, KH: { min: 0.88, max: 0.94 } };
@@ -46,6 +47,7 @@ export class BlendComponent implements OnInit {
   modes = { min_cost: true, max_cheap: true, balanced: true };
   cheapId: number | null = 4;
   scenario = '含水率差异 + 多方案对比（虚构边界）';
+  robustMode = false;  // 名义（精确常量） vs 稳健（检测边界全覆盖）
   loading = false;
   result: BlendResponse | null = null;
   apiError: any = null;
@@ -86,6 +88,17 @@ export class BlendComponent implements OnInit {
       hazards: { Cl: 0.05, alkali_eq: 1.5 },
       modes: ['min_cost'], batch: 5000,
     },
+    {
+      key: 'robust-edge', label: '稳健：名义合格·KH 边界失效',
+      desc: '各化验单带检测不确定度，KH 窗口收到 [0.895,0.92]：名义解落进窗口，'
+        + '但 CaO 取检测上界时 KH 被顶破——稳健模式判不可行并列出报告/组分/突破量。',
+      ids: [1, 2, 3, 4, 5],
+      targets: { SM: JSON.parse(JSON.stringify(BASE_T.SM)),
+                 IM: JSON.parse(JSON.stringify(BASE_T.IM)),
+                 KH: { min: 0.895, max: 0.92 } },
+      hazards: { Cl: 0.05, alkali_eq: 1.5 },
+      modes: ['min_cost'], robust: true,
+    },
   ];
 
   constructor(private api: ApiService) {}
@@ -122,6 +135,7 @@ export class BlendComponent implements OnInit {
       balanced: p.modes.includes('balanced'),
     };
     if (p.cheap_id) this.cheapId = p.cheap_id;
+    this.robustMode = !!p.robust;
   }
 
   selectedCandidates() {
@@ -151,6 +165,7 @@ export class BlendComponent implements OnInit {
       hazard_limits_pct: { Cl: this.hazardCl, alkali_eq: this.hazardAlkali },
       modes: this.selectedModes(),
       cheap_material_id: this.modes.max_cheap ? this.cheapId : null,
+      robust_mode: this.robustMode ? 'robust' : 'nominal',
       save: true,
     }).subscribe({
       next: r => { this.result = r; this.loading = false; },

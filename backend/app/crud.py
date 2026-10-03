@@ -18,8 +18,27 @@ def list_materials(db: Session, active_only: bool = False):
     return mats
 
 
+class _AssayProxy:
+    """请求级化验单代理：仅覆盖 uncertainty（临时容差），绝不写回数据库。"""
+
+    def __init__(self, ass, uncertainty_override):
+        self._ass = ass
+        self.id = ass.id
+        self.version = ass.version
+        self.lab_report_no = ass.lab_report_no
+        self.assayed_at = ass.assayed_at
+        self.basis = ass.basis
+        self.composition = ass.composition
+        self.measured_oxides = ass.measured_oxides
+        self.uncertainty = uncertainty_override
+
+
 def resolve_candidates(db: Session, candidates) -> list[tuple]:
-    """把 [{material_id, assay_version_id?}] 解析成 (Material, AssayVersion)。"""
+    """把 [{material_id, assay_version_id?, uncertainty_override?}] 解析成 (Material, Assay)。
+
+    uncertainty_override 只在本次请求生效（代理对象），不修改 ORM 实体，
+    因此 commit 历史时不会改写已保存的化验单；旧化验版始终保持原样。
+    """
     pairs = []
     for c in candidates:
         mat = db.get(models.Material, c.material_id)
@@ -36,6 +55,8 @@ def resolve_candidates(db: Session, candidates) -> list[tuple]:
                                  f"化验版 id={c.assay_version_id} 不属于原料 {mat.code}。")
         else:
             ass = max(mat.assay_versions, key=lambda a: (a.assayed_at, a.id))
+        if getattr(c, "uncertainty_override", None) is not None:
+            ass = _AssayProxy(ass, c.uncertainty_override)
         pairs.append((mat, ass))
     return pairs
 
@@ -44,7 +65,13 @@ def rows_from_candidates(db: Session, candidates) -> list[Row]:
     return prepare_rows(resolve_candidates(db, candidates))
 
 
+def _public_item(it: dict) -> dict:
+    """去掉内部字段，保留可 JSON 持久化的留痕。"""
+    return {k: v for k, v in it.items() if not k.startswith("_")}
+
+
 def save_run(db: Session, req, solutions: list[dict], scenario_name: str | None = None):
+    robust_on = getattr(req, "robust_mode", None) == "robust"
     run = models.BlendRun(
         run_code=f"RUN-{uuid.uuid4().hex[:10].upper()}",
         scenario_name=scenario_name or getattr(req, "scenario_name", "试算"),
@@ -54,6 +81,7 @@ def save_run(db: Session, req, solutions: list[dict], scenario_name: str | None 
             "hazard_limits_pct": getattr(req, "hazard_limits_pct", {}),
             "cheap_material_id": getattr(req, "cheap_material_id", None),
             "modes": getattr(req, "modes", []),
+            "robust_mode": getattr(req, "robust_mode", "nominal"),
         },
         status="feasible" if any(s["success"] for s in solutions) else "infeasible",
     )
@@ -61,6 +89,21 @@ def save_run(db: Session, req, solutions: list[dict], scenario_name: str | None 
     db.flush()
 
     for sol in solutions:
+        robust_sol = sol.get("robust") if robust_on else None
+        # 稳健子方案完整快照（名义值/最坏边界/触发报告/组分留痕一并保存）
+        robust_report = None
+        if robust_sol is not None:
+            robust_report = {
+                "success": robust_sol["success"],
+                "mode_label": robust_sol.get("mode_label"),
+                "robust_report": robust_sol.get("robust_report"),
+                "indicators": robust_sol.get("indicators"),
+                "composition_dry_pct": robust_sol.get("composition_dry_pct"),
+                "total_cost": robust_sol.get("total_cost"),
+                "cost_per_t_dry": robust_sol.get("cost_per_t_dry"),
+                "diagnostic": robust_sol.get("diagnostic"),
+                "items": [_public_item(it) for it in robust_sol.get("items", [])],
+            }
         srec = models.BlendSolution(
             run_id=run.id,
             mode=sol["mode"],
@@ -74,6 +117,8 @@ def save_run(db: Session, req, solutions: list[dict], scenario_name: str | None 
                 "cost_per_t_dry": sol.get("cost_per_t_dry"),
             },
             diagnostic=sol.get("diagnostic"),
+            robust_mode=getattr(req, "robust_mode", "nominal"),
+            robust_report=robust_report,
         )
         db.add(srec)
         db.flush()
@@ -90,6 +135,8 @@ def save_run(db: Session, req, solutions: list[dict], scenario_name: str | None 
                 cost=it["cost"],
                 conversion_trace=it["conversion_trace"],
                 assay_composition_snapshot=it["conversion_trace"]["steps"],
+                uncertainty_trace=it.get("uncertainty_trace"),
+                worst_case_snapshot=it.get("worst_case_snapshot"),
             ))
     db.commit()
     db.refresh(run)
@@ -127,10 +174,13 @@ def get_run_detail(db: Session, run_id: int):
                 "water_t": it.water_t,
                 "cost": it.cost,
                 "conversion_trace": it.conversion_trace,
+                "uncertainty_trace": it.uncertainty_trace,
+                "worst_case_snapshot": it.worst_case_snapshot,
                 "raw_assay": {
                     "basis": ass.basis,
                     "composition": ass.composition,
                     "measured_oxides": ass.measured_oxides,
+                    "uncertainty": ass.uncertainty,
                 },
             })
         out["solutions"].append({
@@ -139,6 +189,8 @@ def get_run_detail(db: Session, run_id: int):
             "total_cost": s.total_cost,
             "payload": s.indicators,
             "diagnostic": s.diagnostic,
+            "robust_mode": s.robust_mode or "nominal",
+            "robust": s.robust_report,
             "items": items,
         })
     return out
@@ -155,4 +207,6 @@ def list_runs(db: Session, limit: int = 50):
         "status": r.status,
         "created_at": r.created_at.isoformat(timespec="seconds"),
         "modes": [s.mode for s in r.solutions],
+        "robust_mode": r.constraint_set.get("robust_mode", "nominal")
+        if isinstance(r.constraint_set, dict) else "nominal",
     } for r in runs]
