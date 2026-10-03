@@ -12,9 +12,11 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
 
-from . import chemistry, crud, optimizer
-from .database import Base, engine, get_db
+from . import chemistry, crud, models, optimizer
+from .database import Base, engine, ensure_new_columns, get_db
 from .schemas import (
+    AssayCreate,
+    AssayVersionOut,
     BlendRequest,
     BlendResponse,
     EvaluateRequest,
@@ -24,6 +26,7 @@ from .schemas import (
 )
 
 Base.metadata.create_all(bind=engine)
+ensure_new_columns()
 
 app = FastAPI(
     title="离线原料配比试算（虚构工艺边界 · 研发用）",
@@ -59,11 +62,45 @@ def materials(active_only: bool = False, db: Session = Depends(get_db)):
     return crud.list_materials(db, active_only=active_only)
 
 
+@app.post("/api/assays", response_model=AssayVersionOut, status_code=201)
+def create_assay(payload: AssayCreate, db: Session = Depends(get_db)):
+    """登记新化验版并声明同基准检测不确定度（零容差可不填）。只增不改。"""
+    return crud.create_assay_version(db, payload)
+
+
+@app.get("/api/assays/{assay_id}/bounds")
+def assay_bounds(assay_id: int, db: Session = Depends(get_db)):
+    """干基不确定边界预览：名义值 / 下界 / 上界 / 零容差，湿基先做湿→干换算。"""
+    ass = db.get(models.AssayVersion, assay_id)
+    if ass is None:
+        raise HTTPException(404, "化验版不存在。")
+    mat = db.get(models.Material, ass.material_id)
+    comp_dry = chemistry.convert_composition(ass.composition, ass.basis, mat.moisture_pct)
+    unc_native = chemistry.normalize_uncertainties(
+        ass.uncertainties or {}, ass.measured_oxides,
+        material_code=mat.code, material_name=mat.name,
+        assay_version=ass.version, lab_report_no=ass.lab_report_no,
+    )
+    bdry = chemistry.bounds_dry(comp_dry, unc_native, ass.basis, mat.moisture_pct)
+    return {
+        "material_code": mat.code, "material_name": mat.name,
+        "assay_version": ass.version, "lab_report_no": ass.lab_report_no,
+        "basis": ass.basis, "moisture_pct": mat.moisture_pct,
+        "bounds_dry": {c: {
+            "nominal": round(v["nominal"], 4),
+            "lower": round(v["lower"], 4),
+            "upper": round(v["upper"], 4),
+            "zero_tolerance": v["zero_tolerance"],
+        } for c, v in bdry.items()},
+    }
+
+
 def _serialize_solution(sol: dict) -> SolutionOut:
     return SolutionOut(
         mode=sol["mode"],
         mode_label=sol["mode_label"],
         success=sol["success"],
+        robust=bool(sol.get("robust")),
         total_cost=sol.get("total_cost"),
         cost_per_t_dry=sol.get("cost_per_t_dry"),
         indicators=sol.get("indicators"),
@@ -71,6 +108,7 @@ def _serialize_solution(sol: dict) -> SolutionOut:
         composition_wet_pct=sol.get("composition_wet_pct"),
         water_pct_in_wet_mix=sol.get("water_pct_in_wet_mix"),
         diagnostic=sol.get("diagnostic"),
+        worst_case=sol.get("worst_case"),
         items=[SolutionItem(**{k: v for k, v in it.items()
                                if not k.startswith("_")}) for it in sol.get("items", [])],
     )
@@ -83,15 +121,19 @@ def blend(req: BlendRequest, db: Session = Depends(get_db)):
     if not rows:
         raise HTTPException(400, "候选原料为空。")
     solutions = optimizer.solve(rows, req)
+    robust_solutions = optimizer.solve_robust(rows, req) if req.robust else []
     run_id, run_code = None, ""
     if req.save:
-        run = crud.save_run(db, req, solutions)
+        run = crud.save_run(db, req, solutions,
+                            robust_solutions=robust_solutions, rows=rows)
         run_id, run_code = run.id, run.run_code
+    all_sols = solutions + robust_solutions
     return BlendResponse(
         run_id=run_id,
         run_code=run_code,
-        status="feasible" if any(s["success"] for s in solutions) else "infeasible",
+        status="feasible" if any(s["success"] for s in all_sols) else "infeasible",
         solutions=[_serialize_solution(s) for s in solutions],
+        robust_solutions=[_serialize_solution(s) for s in robust_solutions],
     )
 
 
@@ -117,6 +159,26 @@ def evaluate(req: EvaluateRequest, db: Session = Depends(get_db)):
         "composition": r.composition_dry, "measured_oxides": list(r.measured),
     } for r in rows]
     chemistry.require_measured(material_rows, ["CaO", "SiO2", "Al2O3", "Fe2O3"])
+
+    # 稳健评估：按给定份额加权后，率值分母的不确定区间触及零也必须明确拒绝
+    worst_case = None
+    if getattr(req, "robust", False):
+        problems = []
+        blends = chemistry.worst_case_vector(rows, x)
+        for key, den_name in (("SM", "Al2O3+Fe2O3"), ("IM", "Fe2O3"),
+                              ("KH", "2.8*SiO2")):
+            if blends[key].get("undefined"):
+                problems.append({
+                    "indicator": key, "denominator": den_name,
+                    "message": f"该手工份额下 {key} 的分母不确定区间触及零，"
+                               f"边界上 {key} 无定义。",
+                })
+        if problems:
+            raise chemistry.DenominatorSpanZeroError(problems)
+        worst_case = {
+            "indicators": blends,
+            "note": "按给定手工份额、各组分独立取最不利检测误差端点。",
+        }
 
     components = [c for c in optimizer.COMPONENT_ORDER if any(
         c in r.composition_dry for r in rows
@@ -152,6 +214,7 @@ def evaluate(req: EvaluateRequest, db: Session = Depends(get_db)):
         "composition_wet_pct": synth["wet_pct"],
         "water_pct_in_wet_mix": synth["water_pct_in_wet_mix"],
         "contributions": synth["contributions"],
+        "worst_case": worst_case,
         "items": items,
     }
 

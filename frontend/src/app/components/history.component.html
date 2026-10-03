@@ -15,7 +15,8 @@
             <td class="mono small">{{ r.run_code }}</td>
             <td>{{ r.scenario_name }}</td>
             <td><span [class]="'badge ' + (r.status === 'feasible' ? 'ok' : 'err')">
-              {{ r.status }}</span></td>
+              {{ r.status }}</span>
+              <span class="badge warn" *ngIf="r.robust">稳健</span></td>
             <td class="small">{{ r.modes.join('/') }}</td>
             <td class="small muted">{{ r.created_at }}</td>
             <td><button class="ghost" (click)="open(r.id)">回看</button></td>
@@ -37,63 +38,161 @@
         </div>
       </div>
 
-      <div class="panel" *ngFor="let s of detail.solutions" style="margin-bottom:10px">
-        <div class="row">
-          <strong>{{ s.mode }}</strong>
-          <span [class]="'badge ' + (s.success ? 'ok' : 'err')">
-            {{ s.success ? '可行' : '失败' }}</span>
-          <span class="spacer"></span>
-          <span class="small mono" *ngIf="s.success">
-            {{ s.total_cost }} 元 · SM {{ ind(s,'SM') }} IM {{ ind(s,'IM') }}
-            KH {{ ind(s,'KH') }}</span>
+      <div class="panel" style="margin-bottom:10px">
+        <h3>{{ detail.scenario_name }}
+          <span class="mono small muted">{{ detail.run_code }}</span></h3>
+        <div class="small muted">
+          批量 {{ detail.batch_t_dry }} t 干生料 · {{ detail.created_at }} ·
+          目标 SM[{{ detail.target.SM.min }},{{ detail.target.SM.max }}]
+          IM[{{ detail.target.IM.min }},{{ detail.target.IM.max }}]
+          KH[{{ detail.target.KH.min }},{{ detail.target.KH.max }}]
         </div>
-
-        <div class="callout err" *ngIf="!s.success && s.diagnostic">
-          {{ s.diagnostic.message }}
-          <div class="small" *ngFor="let c of s.diagnostic.conflicts">
-            · {{ c.constraint }}：限值 {{ c.limit ?? '—' }}，达到 {{ c.achieved ?? '—' }}，缺口 {{ c.normalized_gap }}
-          </div>
+        <div class="callout info small" *ngIf="detail.uncertainty_snapshot as us"
+             style="margin-top:8px">
+          <strong>本次试算检测不确定度快照</strong>（随运行保存；此后修订化验单容差不改写本运行）
+          <div class="muted" style="margin-top:2px">{{ us.rule }}</div>
+          <table style="margin-top:6px">
+            <thead><tr><th>原料/化验版</th><th>基准</th><th>容差</th>
+              <th>干基不确定边界（部分组分）</th></tr></thead>
+            <tbody>
+              <tr *ngFor="let m of us.materials">
+                <td class="small">{{ m.material_code }} {{ m.material_name }}
+                  <span class="mono">{{ m.assay_version }}</span><br/>
+                  <span class="muted">{{ m.lab_report_no }}</span></td>
+                <td><span [class]="m.basis === 'wet' ? 'badge wet' : 'badge dry'">
+                  {{ m.basis }}</span>
+                  <span class="small muted" *ngIf="m.basis === 'wet'">
+                    ×{{ m.dry_factor }}</span></td>
+                <td><span class="badge warn" *ngIf="m.has_uncertainty">有容差</span>
+                    <span class="badge ok" *ngIf="!m.has_uncertainty">零容差</span></td>
+                <td class="small mono">
+                  <ng-container *ngFor="let key of ['CaO','SiO2','Al2O3','Fe2O3','Cl']">
+                    <span *ngIf="m.bounds_dry[key] as b">
+                      {{ key }}:
+                      <ng-container *ngIf="b.zero_tolerance">{{ b.nominal }}(零容差); </ng-container>
+                      <ng-container *ngIf="!b.zero_tolerance">
+                        [{{ b.lower }}, {{ b.upper }}]; </ng-container>
+                    </span>
+                  </ng-container>
+                </td>
+              </tr>
+            </tbody>
+          </table>
         </div>
-
-        <table *ngIf="s.items?.length" style="margin-top:8px">
-          <thead>
-            <tr><th>原料</th><th>原始化验单</th><th>基准</th>
-              <th class="num">干基%</th><th class="num">干t/湿t/水t</th>
-              <th>换算留痕</th></tr>
-          </thead>
-          <tbody>
-            <tr *ngFor="let it of s.items">
-              <td class="small">{{ it.material_code }} {{ it.material_name }}</td>
-              <td class="small mono">{{ it.assay_version }}<br/>{{ it.lab_report_no }}</td>
-              <td><span class="badge dry" *ngIf="it.raw_assay.basis === 'dry'">dry</span>
-                  <span class="badge wet" *ngIf="it.raw_assay.basis === 'wet'">wet</span></td>
-              <td class="num">{{ it.share_pct_dry }}</td>
-              <td class="num small">{{ it.mass_t_dry }} / {{ it.mass_t_wet }} / {{ it.water_t }}</td>
-              <td>
-                <details class="trace">
-                  <summary>原始化验值 → 干基 → 质量成本</summary>
-                  <div class="small">
-                    <div style="margin:4px 0">原始报送（{{ it.raw_assay.basis }}，{{ it.lab_report_no }}）：
-                      <span class="mono">{{ it.raw_assay.composition | json }}</span>
-                    </div>
-                    <table>
-                      <tr *ngFor="let st of it.conversion_trace.steps">
-                        <td>{{ st.component }}</td>
-                        <td class="num">{{ st.value_in }} {{ st.basis_in }}</td>
-                        <td class="mono" style="font-size:11px">{{ st.formula }}</td>
-                        <td class="num">{{ st.value_out }} {{ st.basis_out }}</td>
-                      </tr>
-                    </table>
-                    <div class="mono" style="margin-top:4px" *ngIf="it.conversion_trace.mass_balance as mb">
-                      {{ mb.cost }}
-                    </div>
-                  </div>
-                </details>
-              </td>
-            </tr>
-          </tbody>
-        </table>
       </div>
+
+      <ng-container *ngFor="let grp of [
+          { list: detail.solutions, title: '名义化验值方案', robust: false },
+          { list: detail.robust_solutions || [], title: '稳健（最坏边界）方案', robust: true }]">
+        <h4 *ngIf="grp.list.length" style="margin:10px 0 6px">
+          {{ grp.title }}（{{ grp.list.length }}）</h4>
+        <div class="panel" *ngFor="let s of grp.list" style="margin-bottom:10px">
+          <div class="row">
+            <strong>{{ s.mode }}
+              <span class="badge warn" *ngIf="s.robust">最坏边界</span></strong>
+            <span [class]="'badge ' + (s.success ? 'ok' : 'err')">
+              {{ s.success ? '可行' : '失败' }}</span>
+            <span class="spacer"></span>
+            <span class="small mono" *ngIf="s.success">
+              {{ s.total_cost }} 元 · SM {{ ind(s,'SM') }} IM {{ ind(s,'IM') }}
+              KH {{ ind(s,'KH') }}</span>
+          </div>
+
+          <!-- 最坏边界余量 -->
+          <table *ngIf="s.success && s.worst_case as wc" style="margin-top:8px">
+            <thead><tr><th>指标</th><th class="num">名义</th>
+              <th class="num">最坏区间</th><th class="num">余量(下/上)</th><th>结论</th></tr></thead>
+            <tbody>
+              <tr *ngFor="let e of wc.indicators">
+                <td>{{ e.indicator }}</td>
+                <td class="num">{{ e.nominal ?? '—' }}</td>
+                <td class="num mono">[{{ e.worst_min ?? '—' }}, {{ e.worst_max ?? '—' }}]</td>
+                <td class="num">{{ margin(s, e.indicator, 'min') }} /
+                  {{ margin(s, e.indicator, 'max') }}</td>
+                <td><span [class]="e.ok ? 'badge ok' : 'badge err'">
+                  {{ e.ok ? '满足' : '突破' }}</span></td>
+              </tr>
+              <tr *ngFor="let h of wc.hazards">
+                <td>{{ h.component }} ≤ {{ h.limit_max }}%</td>
+                <td class="num">{{ wc.hazard_nominal?.[h.component] ?? '—' }}</td>
+                <td class="num mono">[{{ h.worst_min }}, {{ h.worst_max }}]</td>
+                <td class="num">— / {{ h.margin_max }}</td>
+                <td><span [class]="h.ok ? 'badge ok' : 'badge err'">
+                  {{ h.ok ? '满足' : '突破' }}</span></td>
+              </tr>
+            </tbody>
+          </table>
+
+          <div class="callout err" *ngIf="!s.success && s.diagnostic">
+            {{ s.diagnostic.message }}
+            <div class="small" *ngFor="let c of s.diagnostic.conflicts">
+              · {{ c.constraint }}：限值 {{ c.limit ?? '—' }}，
+              达到 {{ c.achieved ?? '—' }}，突破量
+              <strong>{{ c.breakthrough ?? c.normalized_gap }}</strong>
+              <div *ngFor="let tr of c.trigger_reports" style="margin-left:12px">
+                触发：<span class="mono">{{ tr.material_code }} {{ tr.assay_version }}</span>
+                {{ tr.lab_report_no }}（{{ tr.basis }}）—
+                <span *ngFor="let x of tr.components">
+                  {{ x.component }}取{{ x.bound === 'upper' ? '上' : '下' }}界
+                  {{ x.value_dry }}%；
+                </span>
+              </div>
+            </div>
+          </div>
+
+          <table *ngIf="s.items?.length" style="margin-top:8px">
+            <thead>
+              <tr><th>原料</th><th>原始化验单</th><th>基准</th>
+                <th class="num">干基%</th><th class="num">干t/湿t/水t</th>
+                <th>容差快照</th><th>换算留痕</th></tr>
+            </thead>
+            <tbody>
+              <tr *ngFor="let it of s.items">
+                <td class="small">{{ it.material_code }} {{ it.material_name }}</td>
+                <td class="small mono">{{ it.assay_version }}<br/>{{ it.lab_report_no }}</td>
+                <td><span class="badge dry" *ngIf="it.raw_assay.basis === 'dry'">dry</span>
+                    <span class="badge wet" *ngIf="it.raw_assay.basis === 'wet'">wet</span></td>
+                <td class="num">{{ it.share_pct_dry }}</td>
+                <td class="num small">{{ it.mass_t_dry }} / {{ it.mass_t_wet }} / {{ it.water_t }}</td>
+                <td class="small">
+                  <ng-container *ngIf="it.uncertainty_snapshot as us">
+                    <span class="badge ok" *ngIf="allZero(us)">零容差</span>
+                    <details class="trace" *ngIf="!allZero(us)">
+                      <summary>{{ tolerated(us) }} 项容差</summary>
+                      <div *ngFor="let c of toleratedComps(us)" class="mono">
+                        {{ c.component }}: 名义{{ c.nominal_dry }}
+                        [{{ c.lower_dry }}, {{ c.upper_dry }}]（干基）
+                      </div>
+                    </details>
+                  </ng-container>
+                  <span class="muted" *ngIf="!it.uncertainty_snapshot">旧运行·无容差列</span>
+                </td>
+                <td>
+                  <details class="trace">
+                    <summary>原始化验值 → 干基 → 质量成本</summary>
+                    <div class="small">
+                      <div style="margin:4px 0">原始报送（{{ it.raw_assay.basis }}，{{ it.lab_report_no }}）：
+                        <span class="mono">{{ it.raw_assay.composition | json }}</span>
+                      </div>
+                      <table>
+                        <tr *ngFor="let st of it.conversion_trace.steps">
+                          <td>{{ st.component }}</td>
+                          <td class="num">{{ st.value_in }} {{ st.basis_in }}</td>
+                          <td class="mono" style="font-size:11px">{{ st.formula }}</td>
+                          <td class="num">{{ st.value_out }} {{ st.basis_out }}</td>
+                        </tr>
+                      </table>
+                      <div class="mono" style="margin-top:4px" *ngIf="it.conversion_trace.mass_balance as mb">
+                        {{ mb.cost }}
+                      </div>
+                    </div>
+                  </details>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </ng-container>
     </div>
     <div class="muted small" *ngIf="!detail">点击“回看”查看完整追溯。</div>
   </div>

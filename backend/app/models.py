@@ -60,6 +60,9 @@ class AssayVersion(Base):
     basis: Mapped[str] = mapped_column(String(8), default="dry")  # dry / wet
     composition: Mapped[dict] = mapped_column(JSON)
     measured_oxides: Mapped[list] = mapped_column(JSON)  # 实际测定项目，如 ["CaO","SiO2"]
+    # 检测不确定度（与本化验单同一基准 dry/wet 的绝对偏差，质量百分点）：
+    # {"SiO2": {"lower": -0.3, "upper": 0.3}}；NULL/缺省组分 = 零容差（精确常量）。
+    uncertainties: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
     material: Mapped["Material"] = relationship(back_populates="assay_versions")
@@ -76,6 +79,9 @@ class BlendRun(Base):
     batch_t_dry: Mapped[float] = mapped_column(Float)
     target: Mapped[dict] = mapped_column(JSON)
     constraint_set: Mapped[dict] = mapped_column(JSON)
+    # 本次试算所用化验不确定度快照（每候选原料/化验版的名义值与干基上下界），
+    # 独立于当前 assay_version.uncertainties，保证旧运行不被新容差改写。
+    uncertainty_snapshot: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     status: Mapped[str] = mapped_column(String(16))  # feasible / infeasible / error
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     remark: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -95,9 +101,12 @@ class BlendSolution(Base):
     run_id: Mapped[int] = mapped_column(ForeignKey("blend_run.id"))
     mode: Mapped[str] = mapped_column(String(32))  # min_cost / max_cheap / balanced
     success: Mapped[bool] = mapped_column(Boolean)
+    robust: Mapped[bool] = mapped_column(Boolean, default=False)  # 稳健（检测不确定度最坏边界）方案
     total_cost: Mapped[float | None] = mapped_column(Float, nullable=True)
     indicators: Mapped[dict] = mapped_column(JSON)  # SM/IM/KH + 合成成分 + 有害组分
     diagnostic: Mapped[dict | None] = mapped_column(JSON, nullable=True)  # 冲突项诊断
+    # 稳健分析：最不利边界余量、触发边界（报告/组分/突破量）
+    worst_case: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
     run: Mapped["BlendRun"] = relationship(back_populates="solutions")
@@ -125,5 +134,7 @@ class BlendItem(Base):
     # 换算留痕：湿基->干基/干基->湿基每个氧化物的完整过程
     conversion_trace: Mapped[dict] = mapped_column(JSON)
     assay_composition_snapshot: Mapped[dict] = mapped_column(JSON)  # 原始化验单快照
+    # 本原料所用检测不确定度快照（原始基准偏差 + 换算后干基上下界 + 零容差组分）
+    uncertainty_snapshot: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
     run: Mapped["BlendRun"] = relationship(back_populates="items")

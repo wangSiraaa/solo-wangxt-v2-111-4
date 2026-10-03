@@ -41,6 +41,24 @@ class ZeroDenominatorError(BlendError):
         )
 
 
+class BadUncertaintyError(BlendError):
+    def __init__(self, message: str, details: list | dict):
+        super().__init__("BAD_UNCERTAINTY", message, {"items": details}
+                         if isinstance(details, list) else details)
+
+
+class DenominatorSpanZeroError(BlendError):
+    """检测不确定区间使率值分母可能为零——率值在边界上无定义，必须整体拒绝。"""
+
+    def __init__(self, problems: list[dict]):
+        super().__init__(
+            "DENOMINATOR_SPAN_ZERO",
+            "检测不确定区间使 SM/IM/KH 的分母在误差边界上可能为零（含触零），"
+            "该边界下率值无定义；不允许给出无定义的率值，请收紧不确定度或剔除该原料。",
+            {"problems": problems},
+        )
+
+
 def dry_factor(moisture_pct: float) -> float:
     """湿基质量 -> 干基质量的系数 1/(1-w)。"""
     w = moisture_pct / 100.0
@@ -254,3 +272,204 @@ def alkali_equivalent(comp: dict) -> float | None:
     if "Na2O" not in comp or "K2O" not in comp:
         return None
     return float(comp["Na2O"]) + ALKALI_EQ_FACTOR_K2O * float(comp["K2O"])
+
+
+# --------------------------------------------------------------------------
+# 检测不确定度：同基准上下界、湿基→干基区间换算、零容差、分母跨零拒绝
+# --------------------------------------------------------------------------
+UNCERTAINTY_COMPONENTS = [
+    "CaO", "SiO2", "Al2O3", "Fe2O3",
+    "MgO", "SO3", "K2O", "Na2O", "Cl", "LOI",
+]
+
+
+def normalize_uncertainties(
+    uncertainties: dict | None,
+    measured: list[str] | set[str],
+    *,
+    material_code: str = "",
+    material_name: str = "",
+    assay_version: str = "",
+    lab_report_no: str = "",
+) -> dict:
+    """把化验单登记的不确定度统一为 {comp: {"lower": -a, "upper": b}}（与化验同基准）。
+
+    允许写法：
+      - {"SiO2": 0.3}                         对称偏差 ±0.3（质量百分点，同基准）
+      - {"SiO2": {"lower": -0.2, "upper": 0.4}}  非对称偏差
+      - {"SiO2": {"lower": 0, "upper": 0}}    零容差（等价于缺省）
+    校验：键必须为已测组分；lower<=0<=upper；偏差不得使组分下界为负。
+    """
+    measured = set(measured)
+    normalized: dict[str, dict] = {}
+    errors: list[dict] = []
+    base = {
+        "material_code": material_code, "material_name": material_name,
+        "assay_version": assay_version, "lab_report_no": lab_report_no,
+    }
+    for comp, spec in (uncertainties or {}).items():
+        ctx = {**base, "component": comp}
+        if comp not in measured:
+            errors.append({**ctx, "problem": "UNMEASURED_COMPONENT",
+                           "message": "只能为已实测组分声明不确定度；未测项必须先补测。"})
+            continue
+        try:
+            if isinstance(spec, (int, float)):
+                lower, upper = -abs(float(spec)), abs(float(spec))
+            elif isinstance(spec, dict) and "lower" in spec and "upper" in spec:
+                lower, upper = float(spec["lower"]), float(spec["upper"])
+            else:
+                raise ValueError
+        except (TypeError, ValueError):
+            errors.append({**ctx, "problem": "BAD_SHAPE",
+                           "message": "不确定度须为非负数，或 {lower<=0, upper>=0}。"})
+            continue
+        if lower > 0 or upper < 0:
+            errors.append({**ctx, "problem": "BAD_SIGNS",
+                           "message": f"偏差符号非法：lower={lower} 必须 ≤0，upper={upper} 必须 ≥0。"})
+            continue
+        if abs(lower) < EPS and abs(upper) < EPS:
+            continue  # 零容差不落入区间表（按精确常量处理）
+        normalized[comp] = {"lower": lower, "upper": upper}
+    if errors:
+        raise BadUncertaintyError(
+            "化验不确定度登记不合法：未测组分不得声明容差，偏差须满足 lower≤0≤upper。",
+            errors,
+        )
+    return normalized
+
+
+def bounds_dry(
+    composition_dry: dict,
+    uncertainties_native: dict,
+    basis: str,
+    moisture_pct: float,
+) -> dict:
+    """名义干基值 + 不确定区间（全部换到干基，单位：干基质量百分点）。
+
+    dry: 直接加减偏差；wet: 偏差先随名义值一起除以 (1-w)（线性换算，区间不倒置）。
+    返回 {comp: {"nominal", "lower", "upper", "zero_tolerance"}}。
+    """
+    f = 1.0 if basis == "dry" else dry_factor(moisture_pct)
+    out = {}
+    for comp, nominal in composition_dry.items():
+        spec = uncertainties_native.get(comp)
+        if spec is None:
+            out[comp] = {
+                "nominal": float(nominal),
+                "lower": float(nominal),
+                "upper": float(nominal),
+                "zero_tolerance": True,
+            }
+        else:
+            lo = float(nominal) + spec["lower"] * f
+            hi = float(nominal) + spec["upper"] * f
+            # 注意：下界允许为负——率值分母跨零由 check_denominator_intervals
+            # 以 DENOMINATOR_SPAN_ZERO 明确拒绝；此处不静默截断为零，
+            # 以免出现倒置/错误边界，只用标记位提示越过物理零点。
+            out[comp] = {
+                "nominal": float(nominal),
+                "lower": lo,
+                "upper": hi,
+                "zero_tolerance": False,
+                "below_physical_zero": lo < -EPS,
+            }
+    return out
+
+
+def check_denominator_intervals(rows: list) -> None:
+    """率值分母的不确定区间不得触及/跨越零。
+
+    rows: 含 code/name/version/lab_report_no 与 bounds_dry 的求解行。
+    对每个候选原料独立检查其各组分都可能被单独配入（其余份额可趋零），
+    因此任一候选的分母区间下界 ≤ 0 即整体拒绝，不输出无定义的率值。
+    """
+    problems = []
+    denoms = [
+        ("SM", "Al2O3+Fe2O3", ["Al2O3", "Fe2O3"]),
+        ("IM", "Fe2O3", ["Fe2O3"]),
+        ("KH", "2.8*SiO2", ["SiO2"]),
+    ]
+    for r in rows:
+        bd = getattr(r, "bounds_dry", None) or {}
+        for indicator, den_name, comps in denoms:
+            lo = sum(bd[c]["lower"] for c in comps if c in bd)
+            hi = sum(bd[c]["upper"] for c in comps if c in bd)
+            # 名义为正但误差下界把分母带到零（或负）→ 跨零拒绝
+            if lo <= EPS:
+                detail = {c: {k: round(bd[c][k], 4) for k in ("lower", "upper")}
+                          for c in comps if c in bd}
+                problems.append({
+                    "material_code": r.code, "material_name": r.name,
+                    "assay_version": r.version, "lab_report_no": r.lab_report_no,
+                    "indicator": indicator, "denominator": den_name,
+                    "denominator_interval_dry": [round(lo, 4), round(hi, 4)],
+                    "component_bounds_dry": detail,
+                    "message": (f"{r.code} {r.name} 的 {indicator} 分母不确定区间"
+                                f" [{lo:.4f}, {hi:.4f}] 触及零，边界上 {indicator} 无定义。"),
+                })
+    if problems:
+        raise DenominatorSpanZeroError(problems)
+
+
+def worst_case_vector(rows: list, shares_dry, hazard_keys=()) -> dict:
+    """给定固定干基份额 x，计算 SM/IM/KH 与有害组分在检测误差下的最坏边界。
+
+    返回各指标的 nominal / worst_min / worst_max（率值为单调分式，
+    分子取低、分母取高→指标最低；反之为最高），以及触发组分方向。
+    """
+    def col(comp, pick):
+        vals = []
+        for r in rows:
+            b = (getattr(r, "bounds_dry", None) or {}).get(comp)
+            if b is None:
+                v = r.composition_dry.get(comp, 0.0)
+                vals.append(v)
+            else:
+                vals.append(b["lower"] if pick == "lo" else b["upper"])
+        return sum(v * x for v, x in zip(vals, shares_dry))
+
+    S_lo = col("SiO2", "lo"); S_hi = col("SiO2", "hi")
+    A_lo = col("Al2O3", "lo"); A_hi = col("Al2O3", "hi")
+    F_lo = col("Fe2O3", "lo"); F_hi = col("Fe2O3", "hi")
+    C_lo = col("CaO", "lo"); C_hi = col("CaO", "hi")
+
+    out = {}
+    if A_lo + F_lo > EPS:
+        out["SM"] = {
+            "worst_min": round(S_lo / (A_hi + F_hi), 4),
+            "worst_max": round(S_hi / (A_lo + F_lo), 4),
+        }
+    else:
+        out["SM"] = {"undefined": True}
+    if F_lo > EPS:
+        out["IM"] = {
+            "worst_min": round(A_lo / F_hi, 4),
+            "worst_max": round(A_hi / F_lo, 4),
+        }
+    else:
+        out["IM"] = {"undefined": True}
+    if S_lo > EPS:
+        num_lo = C_lo - 1.65 * A_hi - 0.35 * F_hi
+        num_hi = C_hi - 1.65 * A_lo - 0.35 * F_lo
+        out["KH"] = {
+            "worst_min": round(num_lo / (2.8 * S_hi), 4),
+            "worst_max": round(num_hi / (2.8 * S_lo), 4),
+        }
+    else:
+        out["KH"] = {"undefined": True}
+
+    for key in hazard_keys:
+        if key == "alkali_eq":
+            na_lo = col("Na2O", "lo"); na_hi = col("Na2O", "hi")
+            k_lo = col("K2O", "lo"); k_hi = col("K2O", "hi")
+            out["alkali_eq"] = {
+                "worst_min": round(na_lo + ALKALI_EQ_FACTOR_K2O * k_lo, 4),
+                "worst_max": round(na_hi + ALKALI_EQ_FACTOR_K2O * k_hi, 4),
+            }
+        else:
+            out[key] = {
+                "worst_min": round(col(key, "lo"), 4),
+                "worst_max": round(col(key, "hi"), 4),
+            }
+    return out

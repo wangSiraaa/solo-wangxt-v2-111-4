@@ -2,7 +2,12 @@ import { HttpClient } from '@angular/common/http';
 import { Injectable } from '@angular/core';
 import { Observable } from 'rxjs';
 import {
-  BlendRequest, BlendResponse, Material, RunDetail, RunSummary,
+  AssayBounds,
+  BlendRequest,
+  BlendResponse,
+  Material,
+  RunDetail,
+  RunSummary,
 } from '../models/models';
 
 @Injectable({ providedIn: 'root' })
@@ -15,6 +20,11 @@ export class ApiService {
     return this.http.get<Material[]>(`${this.base}/materials`, {
       params: activeOnly ? { active_only: true } : {},
     });
+  }
+
+  /** 化验单干基不确定边界预览（湿基先按含水率换算） */
+  assayBounds(assayId: number): Observable<AssayBounds> {
+    return this.http.get<AssayBounds>(`${this.base}/assays/${assayId}/bounds`);
   }
 
   blend(req: BlendRequest): Observable<BlendResponse> {

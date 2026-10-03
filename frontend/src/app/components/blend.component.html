@@ -100,6 +100,19 @@
         率值居中平衡方案（区间中点偏差最小）</label>
     </div>
 
+    <div class="callout info small" style="margin-top:10px">
+      <label>
+        <input type="checkbox" [(ngModel)]="robust" />
+        <strong>检测不确定度稳健模式</strong>（每个方案并列给出：名义结果 + 最坏边界稳健结果）
+      </label>
+      <div class="muted" style="margin-top:4px">
+        稳健约束逐组分独立取最不利检测误差端点（SM/IM/KH 与有害组分），
+        不是只抽一个幸运样本；湿基化验单上下界先按 /（1−含水率）换到干基。
+        任一率值分母区间触及零将整体拒绝（DENOMINATOR_SPAN_ZERO）。
+        化验单未登记容差的组分按<strong>零容差精确常量</strong>处理。
+      </div>
+    </div>
+
     <label class="small" style="display:block;margin-top:10px">试算名称
       <input class="wide" type="text" [(ngModel)]="scenario" /></label>
     <div class="row" style="margin-top:12px">
@@ -122,6 +135,36 @@
           </tr>
         </tbody>
       </table>
+      <table *ngIf="apiError.details?.problems as problems" style="margin-top:6px">
+        <thead><tr><th>原料</th><th>化验版/单号</th><th>无定义指标</th><th>分母</th>
+          <th>分母区间（干基）</th><th>触发组分区间</th></tr></thead>
+        <tbody>
+          <tr *ngFor="let p of problems">
+            <td>{{ p.material_code }} {{ p.material_name }}</td>
+            <td class="mono small">{{ p.assay_version }}<br/>{{ p.lab_report_no }}</td>
+            <td><span class="badge err">{{ p.indicator }}</span></td>
+            <td class="mono">{{ p.denominator }}</td>
+            <td class="num mono">[{{ p.denominator_interval_dry[0] }},
+              {{ p.denominator_interval_dry[1] }}]</td>
+            <td class="small mono">
+              <span *ngFor="let cb of p.component_bounds_dry | keyvalue">
+                {{ cb.key }}:[{{ $any(cb.value).lower }},{{ $any(cb.value).upper }}]&nbsp;
+              </span>
+            </td>
+          </tr>
+        </tbody>
+      </table>
+      <table *ngIf="apiError.details?.items as items" style="margin-top:6px">
+        <thead><tr><th>原料</th><th>化验版</th><th>组分</th><th>问题</th></tr></thead>
+        <tbody>
+          <tr *ngFor="let x of items">
+            <td>{{ x.material_code }} {{ x.material_name }}</td>
+            <td class="mono">{{ x.assay_version }}</td>
+            <td><span class="badge err">{{ x.component }}</span></td>
+            <td class="small">{{ x.message || x.problem }}</td>
+          </tr>
+        </tbody>
+      </table>
     </div>
   </div>
 </div>
@@ -132,10 +175,27 @@
     试算批次 <span class="mono">{{ result.run_code }}</span>
     状态：<span [class]="'badge ' + (result.status === 'feasible' ? 'ok' : 'err')">
     {{ result.status === 'feasible' ? '存在可行解' : '全部无解' }}</span>
-    （共 {{ result.solutions.length }} 个方案）
+    （名义方案 {{ result.solutions.length }} 个<ng-container *ngIf="result.robust_solutions?.length as rn">
+      ，稳健方案 {{ rn }} 个</ng-container>）
   </div>
+
+  <h2 style="font-size:16px;margin-top:14px">名义化验值方案（化验单按精确常量）</h2>
   <app-solution-card *ngFor="let s of result.solutions; let i = index"
-                     [sol]="s" [targets]="targets" [index]="i"></app-solution-card>
+                     [sol]="s" [targets]="targets" [index]="i"
+                     [robustPeers]="result.robust_solutions || []"></app-solution-card>
+
+  <ng-container *ngIf="result.robust_solutions?.length">
+    <h2 style="font-size:16px;margin-top:18px">
+      检测不确定度稳健方案（SM/IM/KH/有害组分的最坏边界组合）
+    </h2>
+    <p class="muted small">
+      约束系数逐组分独立取最不利检测误差端点——不依赖各组分恰好同向的“幸运样本”；
+      湿基化验单上下界已先按含水率换到干基。全部容差为零时与名义方案完全相同。
+    </p>
+    <app-solution-card *ngFor="let s of result.robust_solutions; let i = index"
+                       [sol]="s" [targets]="targets" [index]="i"
+                       [robustPeers]="[]"></app-solution-card>
+  </ng-container>
 </ng-container>
 
 <!-- 手工配比错误演示 -->

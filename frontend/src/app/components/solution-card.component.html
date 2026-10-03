@@ -1,8 +1,9 @@
-<div class="panel" [style.border-left]="'4px solid #155e63'">
+<div class="panel" [style.border-left]="sol.robust ? '4px solid #b06a00' : '4px solid #155e63'">
   <div class="row">
     <h3>方案 {{ index + 1 }}｜{{ sol.mode_label }}
       <span class="badge ok" *ngIf="sol.success">可行</span>
       <span class="badge err" *ngIf="!sol.success">求解失败</span>
+      <span class="badge warn" *ngIf="sol.robust">最坏边界</span>
     </h3>
     <span class="spacer"></span>
     <span class="muted small mono" *ngIf="sol.success">
@@ -15,20 +16,45 @@
     <strong>{{ sol.diagnostic.reason }}</strong>
     <div>{{ sol.diagnostic.message }}</div>
     <table style="margin-top:8px">
-      <thead><tr><th>冲突约束</th><th class="num">限值</th><th class="num">最小违约解达到值</th><th class="num">违约缺口</th></tr></thead>
+      <thead><tr><th>冲突约束</th><th class="num">限值</th><th class="num">最坏边界达到值</th>
+        <th class="num">突破量</th></tr></thead>
       <tbody>
         <tr *ngFor="let c of sol.diagnostic.conflicts">
           <td>{{ c.constraint }}</td>
           <td class="num">{{ c.limit ?? '—' }}</td>
           <td class="num">{{ c.achieved ?? '—' }}</td>
-          <td class="num">{{ c.normalized_gap }}</td>
+          <td class="num"><strong>{{ c.breakthrough ?? c.normalized_gap }}</strong></td>
         </tr>
       </tbody>
     </table>
+
+    <!-- 导致失败的边界：化验报告 + 组分取界 -->
+    <div *ngFor="let c of sol.diagnostic.conflicts" style="margin-top:8px">
+      <div class="small"><strong>导致「{{ c.constraint }}」失败的检测边界：</strong></div>
+      <table style="margin-top:4px">
+        <thead><tr><th>化验报告</th><th>单号</th><th>基准</th><th>取界组分（干基值）</th></tr></thead>
+        <tbody>
+          <tr *ngFor="let tr of c.trigger_reports">
+            <td class="small">{{ tr.material_code }} {{ tr.material_name }}
+              <span class="mono">{{ tr.assay_version }}</span></td>
+            <td class="small mono">{{ tr.lab_report_no }}</td>
+            <td><span [class]="tr.basis === 'wet' ? 'badge wet' : 'badge dry'">
+              {{ tr.basis }}</span></td>
+            <td class="small">
+              <span *ngFor="let x of tr.components" class="mono" style="margin-right:8px">
+                {{ x.component }}
+                <span [class]="x.bound === 'upper' ? 'badge err' : 'badge warn'">
+                  {{ x.bound === 'upper' ? '↑' : '↓' }}{{ x.value_dry }}%</span>
+              </span>
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
   </div>
 
   <ng-container *ngIf="sol.success">
-    <!-- 率值 KPI -->
+    <!-- 率值 KPI：名义值 -->
     <div class="grid3" style="margin:10px 0">
       <div>
         <div class="kpi">
@@ -36,7 +62,7 @@
             {{ sol.indicators!.SM }}</span>
           <small> 硅率 SM = SiO₂/(Al₂O₃+Fe₂O₃)</small>
         </div>
-        <div class="small muted">目标区间
+        <div class="small muted">名义目标区间
           [{{ targets?.SM?.min ?? '−∞' }}, {{ targets?.SM?.max ?? '+∞' }}]</div>
       </div>
       <div>
@@ -45,7 +71,7 @@
             {{ sol.indicators!.IM }}</span>
           <small> 铝率 IM = Al₂O₃/Fe₂O₃</small>
         </div>
-        <div class="small muted">目标区间
+        <div class="small muted">名义目标区间
           [{{ targets?.IM?.min ?? '−∞' }}, {{ targets?.IM?.max ?? '+∞' }}]</div>
       </div>
       <div>
@@ -54,11 +80,51 @@
             {{ sol.indicators!.KH }}</span>
           <small> 石灰饱和 KH = (CaO−1.65A−0.35F)/(2.8SiO₂)</small>
         </div>
-        <div class="small muted">目标区间
+        <div class="small muted">名义目标区间
           [{{ targets?.KH?.min ?? '−∞' }}, {{ targets?.KH?.max ?? '+∞' }}]</div>
       </div>
     </div>
     <div class="callout warn" *ngFor="let w of sol.indicators?.warnings || []">{{ w }}</div>
+
+    <!-- ===== 检测不确定度最坏边界余量 ===== -->
+    <div *ngIf="sol.worst_case as wc" class="callout"
+         [class.ok]="wc.all_ok" [class.err]="!wc.all_ok"
+         [style.background]="wc.all_ok ? 'var(--ok-bg,#eef8f0)' : '#fdeeee'">
+      <div class="row">
+        <strong>{{ sol.robust ? '稳健约束验证（最坏边界）' : '该配比的检测误差最坏边界余量（参考）' }}</strong>
+        <span class="spacer"></span>
+        <span [class]="wc.all_ok ? 'badge ok' : 'badge err'">
+          {{ wc.all_ok ? '所有边界均满足' : '存在被突破的边界' }}</span>
+      </div>
+      <table style="margin-top:6px">
+        <thead><tr><th>指标/组分</th><th class="num">限值</th><th class="num">名义</th>
+          <th class="num">最坏下界</th><th class="num">最坏上界</th>
+          <th class="num">下限余量</th><th class="num">上限余量</th><th>结论</th></tr></thead>
+        <tbody>
+          <tr *ngFor="let e of wc.indicators">
+            <td>{{ e.indicator }}</td>
+            <td class="num small muted">[{{ e.limit_min ?? '−∞' }}, {{ e.limit_max ?? '+∞' }}]</td>
+            <td class="num">{{ e.nominal ?? '—' }}</td>
+            <td class="num">{{ e.worst_min ?? '—' }}</td>
+            <td class="num">{{ e.worst_max ?? '—' }}</td>
+            <td class="num"><span [class]="marginCls(e.margin_min)">{{ e.margin_min ?? '—' }}</span></td>
+            <td class="num"><span [class]="marginCls(e.margin_max)">{{ e.margin_max ?? '—' }}</span></td>
+            <td><span [class]="e.ok ? 'badge ok' : 'badge err'">{{ e.ok ? '满足' : '突破' }}</span></td>
+          </tr>
+          <tr *ngFor="let h of wc.hazards">
+            <td>{{ h.component }}（有害，干基%）</td>
+            <td class="num small muted">≤ {{ h.limit_max }}</td>
+            <td class="num">{{ wc.hazard_nominal?.[h.component] ?? '—' }}</td>
+            <td class="num">{{ h.worst_min }}</td>
+            <td class="num">{{ h.worst_max }}</td>
+            <td class="num">—</td>
+            <td class="num"><span [class]="marginCls(h.margin_max)">{{ h.margin_max }}</span></td>
+            <td><span [class]="h.ok ? 'badge ok' : 'badge err'">{{ h.ok ? '满足' : '突破' }}</span></td>
+          </tr>
+        </tbody>
+      </table>
+      <div class="small muted" style="margin-top:4px">{{ wc.note }}</div>
+    </div>
 
     <!-- 配料比例条 -->
     <h3 style="margin-top:6px">干基配料比例</h3>
@@ -97,7 +163,7 @@
       </div>
     </div>
 
-    <!-- 物料明细 + 换算留痕 -->
+    <!-- 物料明细 + 换算留痕 + 容差快照 -->
     <h3 style="margin-top:10px">逐原料质量/水量/成本与化验追溯</h3>
     <table>
       <thead>
@@ -105,6 +171,7 @@
           <th>原料</th><th>化验版/单号</th><th class="num">干基%</th>
           <th class="num">干料 t</th><th class="num">湿料 t</th>
           <th class="num">其中水 t</th><th class="num">成本 元</th>
+          <th>容差</th>
           <th>干湿基换算过程</th>
         </tr>
       </thead>
@@ -118,20 +185,42 @@
           <td class="num">{{ it.water_t }}</td>
           <td class="num">{{ it.cost | number:'1.0-2' }}</td>
           <td>
+            <ng-container *ngIf="it.uncertainty_snapshot as us">
+              <span class="badge ok" *ngIf="allZeroTolerance(us)">零容差</span>
+              <span class="badge warn" *ngIf="!allZeroTolerance(us)">
+                {{ toleratedCount(us) }} 项有容差</span>
+            </ng-container>
+          </td>
+          <td>
             <details class="trace" (toggle)="openTrace[it.material_code] = !openTrace[it.material_code]">
               <summary>查看留痕（{{ it.conversion_trace.assay_basis === 'wet' ? '湿→干' : '干基免换算' }}）</summary>
               <div class="small" style="margin-top:6px">
                 <div>含水率 {{ it.conversion_trace.moisture_pct }}%，
                   换算系数 <span class="mono">{{ it.conversion_trace.dry_factor }}</span></div>
                 <table style="margin-top:4px">
-                  <thead><tr><th>组分</th><th>输入</th><th>公式</th><th>输出干基</th></tr></thead>
+                  <thead><tr><th>组分</th><th>输入</th><th>公式</th><th>输出干基</th>
+                    <th>干基不确定区间</th></tr></thead>
                   <tbody>
-                    <tr *ngFor="let st of it.conversion_trace.steps">
-                      <td>{{ st.component }}</td>
-                      <td class="num">{{ st.value_in }} ({{ st.basis_in }})</td>
-                      <td class="mono" style="font-size:11px">{{ st.formula }}</td>
-                      <td class="num">{{ st.value_out }} ({{ st.basis_out }})</td>
-                    </tr>
+                    <ng-container *ngIf="it.uncertainty_snapshot as us">
+                      <tr *ngFor="let st of it.conversion_trace.steps; let i = index">
+                        <td>{{ st.component }}</td>
+                        <td class="num">{{ st.value_in }} ({{ st.basis_in }})</td>
+                        <td class="mono" style="font-size:11px">{{ st.formula }}</td>
+                        <td class="num">{{ st.value_out }} ({{ st.basis_out }})</td>
+                        <td class="num small">
+                          <ng-container *ngFor="let c of us.components">
+                            <span *ngIf="c.component === st.component">
+                              <span *ngIf="c.zero_tolerance" class="badge ok">零容差</span>
+                              <span *ngIf="!c.zero_tolerance" class="mono">
+                                [{{ c.lower_dry }}, {{ c.upper_dry }}]
+                                <span *ngIf="us.basis === 'wet'" class="muted">
+                                  （湿基±{{ c.uncertainty_native.lower | number:'1.0-3' }}换干基）</span>
+                              </span>
+                            </span>
+                          </ng-container>
+                        </td>
+                      </tr>
+                    </ng-container>
                   </tbody>
                 </table>
                 <div style="margin-top:4px" class="mono" *ngIf="it.conversion_trace.mass_balance as mb">
@@ -143,5 +232,70 @@
         </tr>
       </tbody>
     </table>
+
+    <!-- 同名模式的稳健（最坏边界）方案摘要 -->
+    <div *ngIf="!sol.robust && robustPeer() as peer"
+         class="callout" [class.ok]="peer.success" [class.err]="!peer.success"
+         style="margin-top:12px">
+      <div class="row">
+        <strong>并列对比｜稳健（最坏边界）方案 · {{ peer.mode }}</strong>
+        <span class="spacer"></span>
+        <span *ngIf="peer.success" class="badge ok">稳健可行</span>
+        <span *ngIf="!peer.success" class="badge err">稳健不可行</span>
+        <span class="small muted mono" *ngIf="peer.success">
+          {{ peer.cost_per_t_dry | number:'1.0-2' }} 元·t⁻¹干生料
+          （名义 {{ sol.cost_per_t_dry | number:'1.0-2' }}）</span>
+      </div>
+
+      <ng-container *ngIf="peer.success && peer.worst_case as pwc">
+        <table style="margin-top:6px">
+          <thead><tr><th>指标</th><th class="num">名义值</th>
+            <th class="num">最坏区间</th><th class="num">对下限余量</th>
+            <th class="num">对上限余量</th><th>结论</th></tr></thead>
+          <tbody>
+            <tr *ngFor="let e of pwc.indicators">
+              <td>{{ e.indicator }}</td>
+              <td class="num">{{ e.nominal }}</td>
+              <td class="num mono">[{{ e.worst_min }}, {{ e.worst_max }}]</td>
+              <td class="num"><span [class]="marginCls(e.margin_min)">{{ e.margin_min ?? '—' }}</span></td>
+              <td class="num"><span [class]="marginCls(e.margin_max)">{{ e.margin_max ?? '—' }}</span></td>
+              <td><span [class]="e.ok ? 'badge ok' : 'badge err'">{{ e.ok ? '满足' : '突破' }}</span></td>
+            </tr>
+            <tr *ngFor="let h of pwc.hazards">
+              <td>{{ h.component }} ≤ {{ h.limit_max }}%</td>
+              <td class="num">{{ pwc.hazard_nominal?.[h.component] }}</td>
+              <td class="num mono">[{{ h.worst_min }}, {{ h.worst_max }}]</td>
+              <td class="num">—</td>
+              <td class="num"><span [class]="marginCls(h.margin_max)">{{ h.margin_max }}</span></td>
+              <td><span [class]="h.ok ? 'badge ok' : 'badge err'">{{ h.ok ? '满足' : '突破' }}</span></td>
+            </tr>
+          </tbody>
+        </table>
+        <div class="small muted">稳健配料见下方同模式「最坏边界」卡片；最坏边界成本
+          <span class="mono">{{ peer.cost_per_t_dry }}</span> 元/t 干生料。</div>
+      </ng-container>
+
+      <ng-container *ngIf="!peer.success && peer.diagnostic as pd">
+        <div class="small">{{ pd.message }}</div>
+        <table style="margin-top:6px">
+          <thead><tr><th>被突破的边界约束</th><th class="num">限值</th>
+            <th class="num">边界达到</th><th class="num">突破量</th><th>触发报告/组分</th></tr></thead>
+          <tbody>
+            <tr *ngFor="let c of pd.conflicts">
+              <td>{{ c.constraint }}</td>
+              <td class="num">{{ c.limit ?? '—' }}</td>
+              <td class="num">{{ c.achieved ?? '—' }}</td>
+              <td class="num"><strong class="mono">{{ c.breakthrough ?? c.normalized_gap }}</strong></td>
+              <td class="small">
+                <div *ngFor="let tr of c.trigger_reports">
+                  <span class="mono">{{ tr.material_code }} {{ tr.assay_version }}</span>
+                  {{ tr.lab_report_no }}（{{ tr.basis }}）：{{ triggerText(tr) }}
+                </div>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </ng-container>
+    </div>
   </ng-container>
 </div>
